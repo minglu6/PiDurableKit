@@ -1,0 +1,92 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Examples/PiChat/**"
+      - "Sources/**"
+      - "Package.swift"
+      - ".github/workflows/build-unsigned-ipa.yml"
+
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          set -euo pipefail
+          echo "Available Xcodes:"
+          ls /Applications | grep -i Xcode || true
+          xcodebuild -version || true
+          # Prefer Xcode 27 / 26 if present
+          for app in "/Applications/Xcode_27.app" "/Applications/Xcode-27.app" "/Applications/Xcode_26.2.app" "/Applications/Xcode_26.1.app" "/Applications/Xcode_26.app" "/Applications/Xcode.app"; do
+            if [ -d "$app" ]; then
+              echo "Selecting $app"
+              sudo xcode-select -s "$app/Contents/Developer"
+              break
+            fi
+          done
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphone || true
+
+      - name: Build PiChat (unsigned)
+        working-directory: Examples/PiChat
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project PiChat.xcodeproj \
+            -scheme PiChat \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            build | xcbeautify || xcodebuild \
+            -project PiChat.xcodeproj \
+            -scheme PiChat \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/DerivedData" -path '*/Release-iphoneos/PiChat.app' -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "PiChat.app not found. Tree:"
+            find "$RUNNER_TEMP/DerivedData/Build/Products" -maxdepth 3 -type d || true
+            exit 1
+          fi
+          echo "Using app: $APP"
+          STAGE="$RUNNER_TEMP/ipa"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP" "$STAGE/Payload/"
+          # Strip quarantine / extended attrs that confuse some sideloaders
+          xattr -cr "$STAGE/Payload" || true
+          cd "$STAGE"
+          zip -qry "$GITHUB_WORKSPACE/PiChat-unsigned.ipa" Payload
+          ls -lh "$GITHUB_WORKSPACE/PiChat-unsigned.ipa"
+          unzip -l "$GITHUB_WORKSPACE/PiChat-unsigned.ipa" | head -20
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiChat-unsigned
+          path: PiChat-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
